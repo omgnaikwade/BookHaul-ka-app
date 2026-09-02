@@ -173,8 +173,18 @@ object KokoroTokenizer {
             'त' to "t̪", 'थ' to "t̪ʰ", 'द' to "d̪", 'ध' to "d̪ʱ", 'न' to "n",
             'प' to "p", 'फ' to "pʰ", 'ब' to "b", 'भ' to "bʱ", 'म' to "m",
             'य' to "j", 'र' to "r", 'ल' to "l", 'ळ' to "ɭ", 'व' to "ʋ",
-            'श' to "ʃ", 'ष' to "ʂ", 'स' to "s", 'ह' to "h",
-            'क़' to "q", 'ख़' to "x", 'ग़' to "ɣ", 'ज़' to "z", 'ड़' to "ɽ", 'ढ़' to "ɽʱ", 'फ़' to "f"
+            'श' to "ʃ", 'ष' to "ʂ", 'स' to "s", 'ह' to "h"
+        )
+
+        // Nukta consonants (Urdu/Persian loanwords, e.g. ज़रूर, फ़र्क़) are TWO
+        // Unicode codepoints each (base letter + combining nukta U+093C), so
+        // they can't be Char literals ('...') in Kotlin - that caused the
+        // "too many characters in a character literal" build error. Using
+        // String keys here instead and checking them before the single-char
+        // consonantMap fixes it.
+        val nuktaMap = mapOf(
+            "क़" to "q", "ख़" to "x", "ग़" to "ɣ", "ज़" to "z",
+            "ड़" to "ɽ", "ढ़" to "ɽʱ", "फ़" to "f"
         )
 
         val vowelMap = mapOf(
@@ -191,8 +201,32 @@ object KokoroTokenizer {
 
         while (i < len) {
             val ch = text[i]
+            val twoCharSlice = if (i + 1 < len) text.substring(i, i + 2) else null
 
             when {
+                twoCharSlice != null && nuktaMap.containsKey(twoCharSlice) -> {
+                    // Nukta consonant (2 codepoints) - consume both, then run
+                    // the same virama/matra/schwa lookahead as a normal consonant.
+                    val consIpa = nuktaMap[twoCharSlice]!!
+                    sb.append(consIpa)
+                    i += 2
+
+                    val nextChar = if (i < len) text[i] else null
+                    if (nextChar == '्') {
+                        i += 1
+                        continue
+                    } else if (nextChar != null && matraMap.containsKey(nextChar)) {
+                        sb.append(matraMap[nextChar])
+                        i += 1
+                        continue
+                    } else {
+                        val isEndOfWord = (nextChar == null || nextChar.isWhitespace() || nextChar in "।,!?.")
+                        if (!isEndOfWord) {
+                            sb.append("ə")
+                        }
+                        continue
+                    }
+                }
                 consonantMap.containsKey(ch) -> {
                     val consIpa = consonantMap[ch]!!
                     sb.append(consIpa)
