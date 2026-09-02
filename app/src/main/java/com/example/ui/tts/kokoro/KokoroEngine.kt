@@ -84,7 +84,7 @@ class KokoroEngine(private val context: Context, private val modelManager: Kokor
 
         try {
             // Infer language if default
-            val targetLang = if (languageCode == "en" && voiceId.startsWith("h", ignoreCase = true)) "hi" else languageCode
+            val targetLang = languageCode
 
             // 1. Tokenize input text using real phonemizer and vocab
             val tokenIds = KokoroTokenizer.tokenize(text, targetLang, modelManager.configFile)
