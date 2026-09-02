@@ -49,6 +49,10 @@ class KokoroModelManager(private val context: Context) {
     val CONFIG_PRIMARY_URL = "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/config.json"
     val CONFIG_MIRROR_URL = "https://huggingface.co/hexgrad/Kokoro-82M/resolve/main/config.json"
 
+    // Path to the config.json bundled inside the app itself
+    // (app/src/main/assets/kokoro/config.json)
+    private val CONFIG_ASSET_PATH = "kokoro/config.json"
+
     // Official voices path
     val VOICE_PRIMARY_URL_TEMPLATE = "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices/%s.bin"
     val VOICE_MIRROR_URL_TEMPLATE = "https://huggingface.co/hexgrad/Kokoro-82M/resolve/main/voices/%s.bin"
@@ -131,10 +135,19 @@ class KokoroModelManager(private val context: Context) {
 
     /**
      * Downloads the Kokoro quantized model to app storage with progress notifications.
+     *
+     * FIX: previously, when the model was already downloaded (isModelValid() ==
+     * true), this function returned early WITHOUT ever calling downloadConfig()
+     * / ensureConfigAvailable(). That meant config.json (the real vocab) never
+     * got set up for anyone who had already downloaded the model before this
+     * logic existed - which is exactly what was happening here. Now both the
+     * early-return path and the fresh-download path make sure config.json ends
+     * up in place.
      */
     suspend fun downloadModel(onProgress: ((Float, Long, Long) -> Unit)? = null): Boolean = withContext(Dispatchers.IO) {
         if (isModelValid()) {
             Log.d(TAG, "Kokoro model already exists locally (${modelFile.length()} bytes)")
+            ensureConfigAvailable()
             _state.value = _state.value.copy(
                 isModelDownloaded = true,
                 modelSizeBytes = modelFile.length(),
@@ -237,7 +250,7 @@ class KokoroModelManager(private val context: Context) {
         refreshLocalStatus()
 
         if (success) {
-            downloadConfig()
+            ensureConfigAvailable()
             _state.value = _state.value.copy(
                 isModelDownloaded = true,
                 modelSizeBytes = modelFile.length(),
@@ -253,7 +266,41 @@ class KokoroModelManager(private val context: Context) {
     }
 
     /**
+     * Ensures config.json (the REAL Kokoro vocab mapping) is available in
+     * internal storage. Tries the bundled app asset first (works fully
+     * offline, matches the "100% on-device" design, no HuggingFace dependency
+     * at runtime). Falls back to downloading from HuggingFace only if the
+     * asset isn't bundled for some reason.
+     */
+    suspend fun ensureConfigAvailable(): Boolean = withContext(Dispatchers.IO) {
+        if (configFile.exists() && configFile.length() > 100) {
+            return@withContext true
+        }
+
+        // 1. Try the bundled asset: app/src/main/assets/kokoro/config.json
+        try {
+            context.assets.open(CONFIG_ASSET_PATH).use { input ->
+                FileOutputStream(configFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            if (configFile.exists() && configFile.length() > 100) {
+                Log.i(TAG, "config.json copied from bundled app asset ($CONFIG_ASSET_PATH) -> ${configFile.absolutePath}")
+                return@withContext true
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Bundled config.json asset not found or copy failed ($CONFIG_ASSET_PATH): ${e.message}")
+        }
+
+        // 2. Fall back to network download
+        Log.w(TAG, "Falling back to downloading config.json from HuggingFace")
+        return@withContext downloadConfig()
+    }
+
+    /**
      * Downloads official config.json containing vocabulary mapping if needed.
+     * Kept as a network fallback - prefer ensureConfigAvailable() which tries
+     * the bundled asset first.
      */
     suspend fun downloadConfig(): Boolean = withContext(Dispatchers.IO) {
         if (configFile.exists() && configFile.length() > 100) return@withContext true
