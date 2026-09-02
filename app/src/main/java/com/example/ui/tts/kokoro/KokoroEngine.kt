@@ -53,15 +53,6 @@ class KokoroEngine(private val context: Context, private val modelManager: Kokor
                 setIntraOpNumThreads(4)
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
                 setMemoryPatternOptimization(true)
-
-                // Try hardware acceleration first. Falls back silently to CPU
-                // if the device/emulator doesn't support NNAPI.
-                try {
-                    addNnapi()
-                    Log.i(TAG, "NNAPI execution provider enabled (hardware accelerated)")
-                } catch (nnapiError: Exception) {
-                    Log.w(TAG, "NNAPI unavailable on this device, using CPU only: ${nnapiError.message}")
-                }
             }
 
             val session = env.createSession(modelManager.modelFile.absolutePath, sessionOptions)
