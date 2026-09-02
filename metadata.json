@@ -1,0 +1,8 @@
+{
+  "name": "Remix BookHaul Student Library",
+  "description": "A production-ready student library app featuring seamless Supabase integration, personalized profiles, and real-time access to book collections.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

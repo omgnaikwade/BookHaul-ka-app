@@ -1,0 +1,17 @@
+<resources>
+    <string name="app_name">BookHaul</string>
+    <string name="welcome_title">Welcome to BookHaul</string>
+    <string name="welcome_subtitle">Your digital student library for reading, learning, and discovering knowledge.</string>
+    <string name="whats_your_name">What\'s your name?</string>
+    <string name="get_started">Get Started</string>
+    <string name="home_greeting_prefix">Hello, </string>
+    <string name="home_greeting_subtitle">What will you learn today?</string>
+    <string name="search_hint">Search books, authors, topics...</string>
+    <string name="categories_title">Categories</string>
+    <string name="recommended_title">Recommended for you</string>
+    <string name="recent_books_title">Recently Added</string>
+    <string name="popular_books_title">Popular Reads</string>
+    <string name="my_library_title">My Library</string>
+    <string name="favorites_title">Favorites</string>
+    <string name="profile_title">Profile</string>
+</resources>
