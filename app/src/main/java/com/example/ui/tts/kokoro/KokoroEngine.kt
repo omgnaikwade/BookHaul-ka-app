@@ -101,7 +101,7 @@ class KokoroEngine(private val context: Context, private val modelManager: Kokor
             val initialized = initialize()
             if (!initialized || ortSession == null) {
                 Log.e(TAG, "Cannot synthesize: Kokoro engine is not initialized")
-                return@withContext null
+                throw Exception("Engine not initialized - model file missing/invalid, or ONNX session failed to load (check that model_quantized.onnx downloaded fully)")
             }
         }
 
@@ -206,7 +206,7 @@ class KokoroEngine(private val context: Context, private val modelManager: Kokor
 
             if (audioFloats.isEmpty()) {
                 Log.e(TAG, "Inference produced empty audio buffer")
-                return@withContext null
+                throw Exception("Model ran but produced empty audio output - likely an output tensor shape/format mismatch")
             }
 
             // 4. Convert float32 [-1.0, 1.0] samples to 16-bit PCM WAV file
@@ -218,8 +218,13 @@ class KokoroEngine(private val context: Context, private val modelManager: Kokor
         } catch (c: CancellationException) {
             throw c
         } catch (e: Exception) {
+            // FIX: previously this swallowed the real exception and returned
+            // null, so the UI only ever showed a generic "Synthesis failed"
+            // with no way to know why. Now we log it AND rethrow, so the
+            // screen (KokoroTestCard.kt's catch block) shows the real
+            // "Error: <message>" text - no logcat tool needed to debug.
             Log.e(TAG, "Error during Kokoro inference", e)
-            null
+            throw Exception("${e.javaClass.simpleName}: ${e.message}", e)
         }
     }
 
