@@ -3,39 +3,50 @@ package com.example.ui.tts.kokoro
 import android.util.Log
 import org.json.JSONObject
 import java.io.File
-import java.text.Normalizer
 import java.util.Locale
 
 object KokoroTokenizer {
 
     private const val TAG = "KokoroTokenizer"
 
-    // In-memory cached dynamic vocabulary from config.json
+    // In-memory cached dynamic vocabulary from config.json (the REAL, official
+    // Kokoro-82M vocab). This is the only vocab that matches what the model
+    // was actually trained on.
     private var dynamicVocab: Map<String, Long>? = null
+    private var loggedFallbackWarning = false
 
-    // Official Kokoro-82M fallback vocabulary mapping (178 tokens)
+    // WARNING: This is NOT the official Kokoro-82M vocabulary. The real vocab
+    // is a fixed, pinned mapping shipped inside the model's config.json
+    // (see https://huggingface.co/hexgrad/Kokoro-82M/blob/main/config.json,
+    // "vocab" key -> 178 entries). This map below assigns IDs in an arbitrary
+    // order and WILL NOT match the model's trained embeddings.
+    //
+    // Using this fallback is why pronunciation is wrong (especially Hindi,
+    // which relies on many IPA symbols whose invented IDs here are almost
+    // certainly different from what the model expects).
+    //
+    // ACTION REQUIRED: download config.json from the same repo you got the
+    // .onnx model from, and make sure KokoroModelManager downloads/bundles it
+    // and passes it into tokenize() via configFile, so dynamicVocab loads
+    // instead of this fallback.
     private val DEFAULT_VOCAB: Map<String, Long> by lazy {
         val map = mutableMapOf<String, Long>()
-        // Standard punctuation & symbols
         val punct = listOf(";", ":", ",", ".", "!", "?", "-", "'", "\"", "(", ")", "[", "]", "{", "}", "/", "\\", "@", "#", "$", "%", "^", "&", "*", "_", "+", "=", "<", ">", "~", "`", "|", " ")
         punct.forEachIndexed { idx, p -> map[p] = (idx + 1).toLong() }
-        
-        // Digits
+
         for (d in '0'..'9') {
             if (!map.containsKey(d.toString())) {
                 map[d.toString()] = (map.size + 1).toLong()
             }
         }
-        
-        // ASCII Latin
+
         for (c in 'A'..'Z') {
             if (!map.containsKey(c.toString())) map[c.toString()] = (map.size + 1).toLong()
         }
         for (c in 'a'..'z') {
             if (!map.containsKey(c.toString())) map[c.toString()] = (map.size + 1).toLong()
         }
-        
-        // International Phonetic Alphabet (IPA) phonemes used by Kokoro
+
         val ipaSymbols = listOf(
             "ɐ", "ɑ", "ɒ", "ɓ", "ɔ", "ɕ", "ɖ", "ɗ", "ɘ", "ə", "ɚ", "ɛ", "ɜ", "ɝ", "ɞ",
             "ɟ", "ɠ", "ɡ", "ɢ", "ɣ", "ɤ", "ɥ", "ɦ", "ɧ", "ɨ", "ɩ", "ɪ", "ɫ", "ɬ", "ɭ",
@@ -57,7 +68,15 @@ object KokoroTokenizer {
      * Loads the official config.json vocab mapping if present.
      */
     fun loadVocabConfig(configFile: File?) {
-        if (configFile == null || !configFile.exists() || configFile.length() == 0L) return
+        if (configFile == null || !configFile.exists() || configFile.length() == 0L) {
+            if (!loggedFallbackWarning) {
+                Log.e(TAG, "config.json missing or empty (path=${configFile?.absolutePath}). " +
+                        "Falling back to INVENTED vocab IDs - pronunciation will be wrong. " +
+                        "Download the real config.json from the model repo and pass its path here.")
+                loggedFallbackWarning = true
+            }
+            return
+        }
         try {
             val jsonStr = configFile.readText()
             val json = JSONObject(jsonStr)
@@ -71,8 +90,10 @@ object KokoroTokenizer {
                 }
                 if (loadedMap.isNotEmpty()) {
                     dynamicVocab = loadedMap
-                    Log.i(TAG, "Loaded ${loadedMap.size} tokens from config.json")
+                    Log.i(TAG, "Loaded ${loadedMap.size} tokens from config.json (REAL Kokoro vocab active)")
                 }
+            } else {
+                Log.e(TAG, "config.json found but has no 'vocab' key - still using fallback (wrong) vocab")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to parse vocab from config.json: ${e.message}")
@@ -80,7 +101,13 @@ object KokoroTokenizer {
     }
 
     private fun getVocab(): Map<String, Long> {
-        return dynamicVocab ?: DEFAULT_VOCAB
+        val real = dynamicVocab
+        if (real == null && !loggedFallbackWarning) {
+            Log.e(TAG, "Using FALLBACK invented vocab (config.json never loaded successfully). " +
+                    "Pronunciation accuracy cannot be fixed until this is resolved.")
+            loggedFallbackWarning = true
+        }
+        return real ?: DEFAULT_VOCAB
     }
 
     /**
@@ -91,28 +118,21 @@ object KokoroTokenizer {
         loadVocabConfig(configFile)
         val vocab = getVocab()
 
-        // 1. Phonemize text based on language
         val phonemes = phonemize(text, languageCode)
 
-        // 2. Map phonemes to token IDs
         val tokens = mutableListOf<Long>()
-        // Kokoro expects leading token 0 (start token)
         tokens.add(0L)
 
         for (ch in phonemes) {
             val s = ch.toString()
             val id = vocab[s] ?: when (ch) {
                 ' ', '\n', '\t', '\r' -> vocab[" "] ?: 1L
-                else -> {
-                    // Fallback to lower-case or standard ASCII
-                    vocab[s.lowercase(Locale.ROOT)] ?: 1L
-                }
+                else -> vocab[s.lowercase(Locale.ROOT)] ?: 1L
             }
             tokens.add(id)
             if (tokens.size >= 508) break
         }
 
-        // Kokoro expects trailing token 0 (end token)
         tokens.add(0L)
 
         return tokens.toLongArray()
@@ -120,6 +140,16 @@ object KokoroTokenizer {
 
     /**
      * Grapheme-to-Phoneme converter for English and Hindi.
+     *
+     * NOTE: The real Kokoro pipeline uses the "misaki" G2P library, which is
+     * backed by espeak-ng, to produce phonemes - especially for Hindi, where
+     * schwa deletion and consonant clusters follow rules that are hard to
+     * replicate by hand. The phonemizeHindi() below is a reasonable manual
+     * approximation but will diverge from what the model was trained on.
+     * Once the vocab ID fix above is confirmed working, if Hindi is still
+     * far off, the next step is integrating a real espeak-ng based G2P
+     * (e.g. an Android NDK build of espeak-ng) instead of this hand-written
+     * mapping.
      */
     fun phonemize(text: String, languageCode: String): String {
         val clean = text.trim()
@@ -131,15 +161,11 @@ object KokoroTokenizer {
         }
     }
 
-    /**
-     * Indic G2P converter for Hindi (Devanagari script to IPA).
-     */
     private fun phonemizeHindi(text: String): String {
         val sb = StringBuilder()
         var i = 0
         val len = text.length
 
-        // Consonant map to IPA
         val consonantMap = mapOf(
             'क' to "k", 'ख' to "kʰ", 'ग' to "ɡ", 'घ' to "ɡʱ", 'ङ' to "ŋ",
             'च' to "tʃ", 'छ' to "tʃʰ", 'ज' to "dʒ", 'झ' to "dʒʱ", 'ञ' to "ɲ",
@@ -148,17 +174,15 @@ object KokoroTokenizer {
             'प' to "p", 'फ' to "pʰ", 'ब' to "b", 'भ' to "bʱ", 'म' to "m",
             'य' to "j", 'र' to "r", 'ल' to "l", 'ळ' to "ɭ", 'व' to "ʋ",
             'श' to "ʃ", 'ष' to "ʂ", 'स' to "s", 'ह' to "h",
-            'क़' to "q", 'ख़' to "x", 'ग़' to "ɣ", 'ज़' to "z", 'ड़' to "ɽ", 'ढ़' to "ɽʱ", 'फ़' to "f"
+            'क़' to "q", 'ख़' to "x", 'ग़' to "ɣ", 'ज़' to "z", 'ड़' to "ɽ", 'ढ़' to "ɽʱ", 'फ़' to "f"
         )
 
-        // Independent vowels to IPA
         val vowelMap = mapOf(
             'अ' to "ə", 'आ' to "aː", 'इ' to "ɪ", 'ई' to "iː",
             'उ' to "ʊ", 'ऊ' to "uː", 'ऋ' to "rɪ", 'ए' to "eː",
             'ऐ' to "ɛː", 'ओ' to "oː", 'औ' to "ɔː"
         )
 
-        // Matras (dependent vowel signs) to IPA
         val matraMap = mapOf(
             'ा' to "aː", 'ि' to "ɪ", 'ी' to "iː",
             'ु' to "ʊ", 'ू' to "uː", 'ृ' to "rɪ",
@@ -172,20 +196,16 @@ object KokoroTokenizer {
                 consonantMap.containsKey(ch) -> {
                     val consIpa = consonantMap[ch]!!
                     sb.append(consIpa)
-                    
-                    // Lookahead for virama, matra, or inherent vowel
+
                     val nextChar = if (i + 1 < len) text[i + 1] else null
                     if (nextChar == '्') {
-                        // Virama suppresses inherent vowel
                         i += 2
                         continue
                     } else if (nextChar != null && matraMap.containsKey(nextChar)) {
-                        // Matra replaces inherent vowel
                         sb.append(matraMap[nextChar])
                         i += 2
                         continue
                     } else {
-                        // Inherent schwa 'ə' unless end of word
                         val isEndOfWord = (nextChar == null || nextChar.isWhitespace() || nextChar in "।,!?.")
                         if (!isEndOfWord) {
                             sb.append("ə")
@@ -204,7 +224,6 @@ object KokoroTokenizer {
                 ch == 'ऽ' -> { /* Avagraha, prolong vowel */ }
                 ch == '।' || ch == '॥' -> sb.append(".")
                 else -> {
-                    // Pass-through standard characters, spaces, punctuation
                     sb.append(ch)
                 }
             }
@@ -213,9 +232,6 @@ object KokoroTokenizer {
         return sb.toString()
     }
 
-    /**
-     * Rule-based English phonemizer converting text into IPA phonetic symbols.
-     */
     private fun phonemizeEnglish(text: String): String {
         val expanded = expandEnglishAbbreviationsAndNumbers(text)
         val words = expanded.split(Regex("(?<=\\s)|(?=\\s)|(?<=[.,!?;:\"]) |(?=[.,!?;:\"])"))
@@ -257,7 +273,6 @@ object KokoroTokenizer {
             .replace("it's", "ɪts")
             .replace("i'm", "aɪm")
 
-        // Convert simple digits to spoken words
         res = res.replace(Regex("\\b0\\b"), "zero")
             .replace(Regex("\\b1\\b"), "one")
             .replace(Regex("\\b2\\b"), "two")
@@ -274,10 +289,8 @@ object KokoroTokenizer {
     }
 
     private fun englishWordToIpa(word: String): String {
-        // Common words fast lookup dictionary
         COMMON_ENGLISH_IPA[word]?.let { return it }
 
-        // Morphological / rule-based IPA conversion
         var w = word
             .replace("th", "θ")
             .replace("sh", "ʃ")
@@ -299,7 +312,6 @@ object KokoroTokenizer {
             .replace("oi", "ɔɪ")
             .replace("oy", "ɔɪ")
 
-        // Silent 'e' at end of word lengthening preceding vowel
         if (w.length > 2 && w.endsWith("e") && !w.endsWith("ee")) {
             w = w.dropLast(1)
         }
@@ -333,4 +345,3 @@ object KokoroTokenizer {
         "voice" to "vɔɪs", "player" to "ˈpleɪər", "page" to "peɪdʒ", "chapter" to "ˈtʃæptər"
     )
 }
-
