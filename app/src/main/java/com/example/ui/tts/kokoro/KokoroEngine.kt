@@ -30,6 +30,11 @@ class KokoroEngine(private val context: Context, private val modelManager: Kokor
     /**
      * Initializes the ONNX Runtime session using the downloaded quantized ONNX model.
      * Runs in the background and does not block the UI thread.
+     *
+     * FIX: Added NNAPI execution provider so inference runs on the device's
+     * neural accelerator / GPU instead of pure CPU. This is very likely the
+     * biggest reason synthesis was taking 10-15 minutes instead of seconds.
+     * If NNAPI isn't available on a device/emulator, we safely fall back to CPU.
      */
     suspend fun initialize(): Boolean = withContext(Dispatchers.IO) {
         if (isInitialized.get() && ortSession != null) {
@@ -47,6 +52,16 @@ class KokoroEngine(private val context: Context, private val modelManager: Kokor
             val sessionOptions = OrtSession.SessionOptions().apply {
                 setIntraOpNumThreads(4)
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                setMemoryPatternOptimization(true)
+
+                // Try hardware acceleration first. Falls back silently to CPU
+                // if the device/emulator doesn't support NNAPI.
+                try {
+                    addNnapi()
+                    Log.i(TAG, "NNAPI execution provider enabled (hardware accelerated)")
+                } catch (nnapiError: Exception) {
+                    Log.w(TAG, "NNAPI unavailable on this device, using CPU only: ${nnapiError.message}")
+                }
             }
 
             val session = env.createSession(modelManager.modelFile.absolutePath, sessionOptions)
@@ -54,6 +69,17 @@ class KokoroEngine(private val context: Context, private val modelManager: Kokor
             ortSession = session
             isInitialized.set(true)
             Log.i(TAG, "Kokoro-82M ONNX Runtime session successfully initialized! Input names: ${session.inputNames}")
+
+            // Diagnostic: confirm whether the REAL Kokoro vocab (from config.json)
+            // is available. If this logs a warning, token IDs sent to the model
+            // are wrong and audio quality (especially Hindi) will be broken
+            // regardless of any G2P fixes.
+            if (modelManager.configFile == null || !modelManager.configFile!!.exists()) {
+                Log.e(TAG, "config.json NOT FOUND - using invented fallback vocab IDs. " +
+                        "This WILL cause wrong/garbled pronunciation. Download the official " +
+                        "config.json from the same model repo and place it next to the .onnx file.")
+            }
+
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize Kokoro ONNX session", e)
@@ -83,11 +109,12 @@ class KokoroEngine(private val context: Context, private val modelManager: Kokor
         val env = ortEnvironment ?: return@withContext null
 
         try {
-            // Infer language if default
             val targetLang = languageCode
 
             // 1. Tokenize input text using real phonemizer and vocab
+            val tokenizeStart = System.currentTimeMillis()
             val tokenIds = KokoroTokenizer.tokenize(text, targetLang, modelManager.configFile)
+            Log.d(TAG, "Tokenization took ${System.currentTimeMillis() - tokenizeStart}ms for ${tokenIds.size} tokens")
             if (tokenIds.isEmpty()) return@withContext null
 
             // 2. Load voice style embedding
@@ -144,6 +171,11 @@ class KokoroEngine(private val context: Context, private val modelManager: Kokor
             val results = session.run(inputs)
             val elapsed = System.currentTimeMillis() - startTime
             Log.d(TAG, "Inference completed in ${elapsed}ms")
+            if (elapsed > 5000) {
+                Log.w(TAG, "Inference is unusually slow (${elapsed}ms). Check if NNAPI enabled successfully " +
+                        "(see 'NNAPI execution provider enabled' log line at startup) and confirm the model " +
+                        "file is the quantized (int8) version, not fp32.")
+            }
 
             // Extract output audio samples
             val outputTensor = results.get(0)
@@ -231,7 +263,6 @@ class KokoroEngine(private val context: Context, private val modelManager: Kokor
                 val floats = FloatArray(numFloats)
                 byteBuffer.asFloatBuffer().get(floats)
 
-                // If the file contains a 256 vector or multiple rows (e.g. 510x256)
                 if (floats.size >= 256) {
                     val row = (tokenCount.coerceIn(0, (floats.size / 256) - 1)) * 256
                     return floats.copyOfRange(row, row + 256)
@@ -242,7 +273,6 @@ class KokoroEngine(private val context: Context, private val modelManager: Kokor
             }
         }
 
-        // Fallback default style embedding (256-dimensional unit vector)
         val defaultVector = FloatArray(256)
         for (i in 0 until 256) {
             defaultVector[i] = if (i % 2 == 0) 0.05f else -0.05f
@@ -262,28 +292,24 @@ class KokoroEngine(private val context: Context, private val modelManager: Kokor
         val fos = FileOutputStream(outputFile)
         val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
 
-        // RIFF header
         header.put("RIFF".toByteArray())
         header.putInt(totalSize)
         header.put("WAVE".toByteArray())
 
-        // fmt chunk
         header.put("fmt ".toByteArray())
-        header.putInt(16) // chunk size
-        header.putShort(1.toShort()) // PCM format
+        header.putInt(16)
+        header.putShort(1.toShort())
         header.putShort(numChannels.toShort())
         header.putInt(sampleRate)
         header.putInt(byteRate)
         header.putShort(blockAlign.toShort())
         header.putShort(bitsPerSample.toShort())
 
-        // data chunk
         header.put("data".toByteArray())
         header.putInt(dataSize)
 
         fos.write(header.array())
 
-        // Write PCM 16-bit samples
         val pcmBuffer = ByteBuffer.allocate(numSamples * 2).order(ByteOrder.LITTLE_ENDIAN)
         for (sample in floats) {
             val clamped = sample.coerceIn(-1.0f, 1.0f)
